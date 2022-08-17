@@ -78,7 +78,14 @@ class fit_signal:
         ax[1].set_ylabel("Signal")
         fig.align_labels()
 
-    def fit(self):
+    def fit(self,
+            form='linear'):
+        """Fit the trace based on identified step regions.
+
+        Args:
+            form (str, optional): Type of step function to send to lmfits StepModel.
+            Options are 'linear', 'atan', 'erf', and 'logistic'. Defaults to 'linear'.
+        """
         time, trace = self.time, self.trace
         model = ConstantModel()
         params = model.make_params(c=trace[:10].mean())
@@ -88,7 +95,7 @@ class fit_signal:
             xmax, xmin = max(stime), min(stime)
             ymax, ymin = max(strace), min(strace)
             sigma = (xmax-xmin)/2
-            step = StepModel(prefix=f"s{i}_")
+            step = StepModel(prefix=f"s{i}_", form=form)
             params.add(f"s{i}_amplitude", value=ymax-ymin)
             params.add(f"s{i}_center", value=xmin + sigma)
             params.add(f"s{i}_sigma", value=sigma, min=0,
