@@ -34,18 +34,18 @@ class fit_signal:
                  dt=1,
                  window_length=100,
                  method='ttest',
-                 min_threshold=0.05,
-                 max_threshold=0.005,
+                 min_threshold=0.005,
+                 max_threshold=0.05,
                  **kwargs) -> None:
         """Calculate fit signal
 
         Args:
-            trace (_type_): _description_
-            dt (int, optional): _description_. Defaults to 1.
-            window_length (int, optional): _description_. Defaults to 100.
-            method (str, optional): _description_. Defaults to 'ttest'.
-            min_threshold (float, optional): _description_. Defaults to 0.05.
-            max_threshold (float, optional): _description_. Defaults to 0.005.
+            trace (array-like): Time series of measurement values.
+            dt (int, optional): Time step between measurement values. Defaults to 1.
+            window_length (int, optional): Length of window to use. Defaults to 100.
+            method (str, optional): Method to identify steps. Defaults to 'ttest'.
+            min_threshold (float, optional): Minimum pvalue threshold. Defaults to 0.005.
+            max_threshold (float, optional): Maximum pvalue threshold. Defaults to 0.05.
         """
         self.trace = trace
         time = np.arange(dt, trace.size*dt+dt, dt)
@@ -54,13 +54,13 @@ class fit_signal:
             self.score, self.pvalue = rolling_ttest(trace,
                                                     window_length,
                                                     **kwargs)
-            regions = contiguous_regions(self.pvalue < min_threshold)
+            regions = contiguous_regions(self.pvalue < max_threshold)
             # Filter out regions that are shorter than window_length
             msk = np.ravel(np.diff(regions) >= window_length)
             regions = np.array(regions)[msk]
-            # Filter out regions with no pvalues greater than max_threshold
+            # Filter out regions with no pvalues greater than min_threshold
             regions = np.array([r for r in regions if any(
-                self.pvalue[slice(*r)] < max_threshold)])
+                self.pvalue[slice(*r)] < min_threshold)])
             self.regions = regions
 
     def plot(self):
@@ -79,12 +79,16 @@ class fit_signal:
         fig.align_labels()
 
     def fit(self,
-            form='linear'):
+            form='linear',
+            min_step_size=-np.inf,
+            max_step_size=np.inf):
         """Fit the trace based on identified step regions.
 
         Args:
             form (str, optional): Type of step function to send to lmfits StepModel.
             Options are 'linear', 'atan', 'erf', and 'logistic'. Defaults to 'linear'.
+            min_step_size (float, optional): Minimum step size when fitting. Default is -inf.
+            max_step_size (number, optional): Maximum step size when fitting. Default is inf.
         """
         time, trace = self.time, self.trace
         model = ConstantModel()
@@ -96,9 +100,14 @@ class fit_signal:
             ymax, ymin = max(strace), min(strace)
             sigma = (xmax-xmin)/2
             step = StepModel(prefix=f"s{i}_", form=form)
-            params.add(f"s{i}_amplitude", value=ymax-ymin)
+            params.add(f"s{i}_amplitude",
+                       value=ymax-ymin,
+                       min=min_step_size,
+                       max=max_step_size)
             params.add(f"s{i}_center", value=xmin + sigma)
-            params.add(f"s{i}_sigma", value=sigma, min=0,
+            params.add(f"s{i}_sigma",
+                       value=sigma,
+                       min=0,
                        max=2*sigma)
             model += step
         self.output = model.fit(trace, params, x=time)
