@@ -81,7 +81,9 @@ class fit_signal:
     def fit(self,
             form='linear',
             min_step_size=-np.inf,
-            max_step_size=np.inf):
+            max_step_size=np.inf,
+            fixed_step_width=None,
+            max_step_width=None):
         """Fit the trace based on identified step regions.
 
         Args:
@@ -89,6 +91,8 @@ class fit_signal:
             Options are 'linear', 'atan', 'erf', and 'logistic'. Defaults to 'linear'.
             min_step_size (float, optional): Minimum step size when fitting. Default is -inf.
             max_step_size (number, optional): Maximum step size when fitting. Default is inf.
+            fixed_step_width (float, optional): Fixed step width when fitting. Default is None.
+            max_step_width (float, optional): Maximum step width when fitting. Default is None.
         """
         time, trace = self.time, self.trace
         model = ConstantModel()
@@ -105,10 +109,20 @@ class fit_signal:
                        min=min_step_size,
                        max=max_step_size)
             params.add(f"s{i}_center", value=xmin + sigma)
-            params.add(f"s{i}_sigma",
-                       value=sigma,
-                       min=0,
-                       max=2*sigma)
+            if fixed_step_width is not None:
+                params.add(f"s{i}_sigma",
+                           value=fixed_step_width,
+                           vary=False)
+            elif max_step_width is not None:
+                params.add(f"s{i}_sigma",
+                           value=sigma,
+                           min=0,
+                           max=max_step_width)
+            else:
+                params.add(f"s{i}_sigma",
+                           value=sigma,
+                           min=0,
+                           max=2*sigma)
             model += step
         self.output = model.fit(trace, params, x=time)
 
