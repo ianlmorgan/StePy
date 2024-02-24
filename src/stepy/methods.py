@@ -48,6 +48,7 @@ class fit_signal:
             max_threshold (float, optional): Maximum pvalue threshold. Defaults to 0.05.
         """
         self.trace = trace
+        self.dt = dt
         time = np.arange(dt, trace.size*dt+dt, dt)
         self.time = time
         if method == 'ttest':
@@ -73,6 +74,11 @@ class fit_signal:
         ax[1].plot(self.time, self.trace)
         if hasattr(self, "output"):
             ax[1].plot(self.time, self.trace + self.output.residual)
+        if hasattr(self, 'outputs'):
+            for i, r in enumerate(self.regions):
+                stime = self.time[slice(*r)]
+                strace = self.trace[slice(*r)]
+                ax[1].plot(stime, strace+self.outputs[i].residual, lw=2)
         ax[1].set_xlabel("Time")
         ax[0].set_ylabel("P-value")
         ax[1].set_ylabel("Signal")
@@ -83,7 +89,7 @@ class fit_signal:
             min_step_size=-np.inf,
             max_step_size=np.inf,
             fixed_step_width=None,
-            max_step_width=None):
+            max_step_width=np.inf):
         """Fit the trace based on identified step regions.
 
         Args:
@@ -94,14 +100,13 @@ class fit_signal:
             fixed_step_width (float, optional): Fixed step width when fitting. Default is None.
             max_step_width (float, optional): Maximum step width when fitting. Default is None.
         """
-        time, trace = self.time, self.trace
         model = ConstantModel()
-        params = model.make_params(c=trace[:10].mean())
+        params = model.make_params(c=self.trace[:10].mean())
         for i, r in enumerate(self.regions):
-            stime = time[slice(*r)]
-            strace = trace[slice(*r)]
-            xmax, xmin = max(stime), min(stime)
-            ymax, ymin = max(strace), min(strace)
+            stime = self.time[slice(*r)]
+            strace = self.trace[slice(*r)]
+            xmax, xmin = stime[-10], stime[10]
+            ymax, ymin = strace[-10:].mean(), strace[:10].mean()
             sigma = (xmax-xmin)/2
             step = StepModel(prefix=f"s{i}_", form=form)
             params.add(f"s{i}_amplitude",
@@ -124,24 +129,82 @@ class fit_signal:
                            min=0,
                            max=2*sigma)
             model += step
-        self.output = model.fit(trace, params, x=time)
+        self.output = model.fit(self.trace, params, x=self.time)
+
+    def fit2(self,
+             form='linear',
+             min_step_size=-np.inf,
+             max_step_size=np.inf,
+             fixed_step_width=None,
+             max_step_width=None):
+        self.outputs = []
+        for i, r in enumerate(self.regions):
+            stime = self.time[slice(*r)]
+            strace = self.trace[slice(*r)]
+            xmax, xmin = stime[-10], stime[10]
+            ymax, ymin = strace[-10:].mean(), strace[:10].mean()
+            sigma = (xmax-xmin)/2
+            model = ConstantModel(prefix=f"s{i}_")
+            params = model.make_params(c=ymin)
+            step = StepModel(prefix=f"s{i}_", form=form)
+            params.add(f"s{i}_amplitude",
+                       value=ymax-ymin,
+                       min=min_step_size,
+                       max=max_step_size)
+            params.add(f"s{i}_center", value=xmin + sigma)
+            if fixed_step_width is not None:
+                params.add(f"s{i}_sigma",
+                           value=fixed_step_width,
+                           vary=False)
+            elif max_step_width is not None:
+                params.add(f"s{i}_sigma",
+                           value=sigma,
+                           min=0,
+                           max=max_step_width)
+            else:
+                params.add(f"s{i}_sigma",
+                           value=sigma,
+                           min=0,
+                           max=2*sigma)
+            model += step
+            self.outputs.append(model.fit(strace, params, x=stime))
 
     @property
     def results(self):
-        params = self.output.params.valuesdict()
-        results = {"step_height": [], "step_width": [], "dwell_time": [],
-                   "step_rate": [], "step_start": []}
-        for i, _ in enumerate(self.regions):
-            results["step_height"].append(params[f"s{i}_amplitude"])
-            results["step_width"].append(params[f"s{i}_sigma"])
-            if i == 0:
-                results["dwell_time"].append(0)
-            else:
-                dwell_time = params[f"s{i}_center"] -  \
-                    params[f"s{i-1}_center"] - \
-                    params[f"s{i-1}_sigma"]
-                results["dwell_time"].append(dwell_time)
-            results["step_rate"].append(params[f"s{i}_amplitude"] /
-                                        params[f"s{i}_sigma"])
-            results["step_start"].append(params[f"s{i}_center"])
-        return results
+        if hasattr(self, "output"):
+            params = self.output.params.valuesdict()
+            results = {"step_height": [], "step_width": [], "dwell_time": [],
+                       "step_rate": [], "step_start": []}
+            for i, _ in enumerate(self.regions):
+                results["step_height"].append(params[f"s{i}_amplitude"])
+                results["step_width"].append(params[f"s{i}_sigma"])
+                if i == 0:
+                    results["dwell_time"].append(0)
+                else:
+                    dwell_time = params[f"s{i}_center"] -  \
+                        params[f"s{i-1}_center"] - \
+                        params[f"s{i-1}_sigma"]
+                    results["dwell_time"].append(dwell_time)
+                results["step_rate"].append(params[f"s{i}_amplitude"] /
+                                            params[f"s{i}_sigma"])
+                results["step_start"].append(params[f"s{i}_center"])
+            return results
+        elif hasattr(self, "outputs"):
+            results = {"step_height": [], "step_width": [],
+                       "step_rate": [], "step_start": [],
+                       # "total_relaxation_time": [],
+                       }
+            for i, output in enumerate(self.outputs):
+                params = output.params.valuesdict()
+                if i == 0:
+                    first_step = params[f"s{i}_center"]
+                results["step_height"].append(params[f"s{i}_amplitude"])
+                results["step_width"].append(params[f"s{i}_sigma"])
+                results["step_rate"].append(params[f"s{i}_amplitude"] /
+                                            params[f"s{i}_sigma"])
+                results["step_start"].append(params[f"s{i}_center"])
+            last_step = params[f"s{i}_center"] + params[f"s{i}_sigma"]
+            # results["total_relaxation_time"] = last_step - first_step
+            return results
+        else:
+            return None
