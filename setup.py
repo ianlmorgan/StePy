@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 setup(author="Ian L. Morgan",
-      version="0.0.3",
+      version="0.0.4",
       name="stepy",
       package_dir={'': 'src'},
       packages=find_packages('src'),

@@ -49,8 +49,11 @@ class fit_signal:
         """
         self.trace = trace
         self.dt = dt
+        self.window_length = window_length
         time = np.arange(dt, trace.size*dt+dt, dt)
         self.time = time
+        self.max_threshold = max_threshold
+        self.min_threshold = min_threshold
         if method == 'ttest':
             self.score, self.pvalue = rolling_ttest(trace,
                                                     window_length,
@@ -71,7 +74,7 @@ class fit_signal:
         ax[0].semilogy(self.time, self.pvalue)
         for r in self.regions:
             ax[0].semilogy(self.time[slice(*r)], self.pvalue[slice(*r)])
-        ax[1].plot(self.time, self.trace)
+        ax[1].plot(self.time, self.trace, alpha=0.6)
         if hasattr(self, "output"):
             ax[1].plot(self.time, self.trace + self.output.residual)
         if hasattr(self, 'outputs'):
@@ -101,13 +104,20 @@ class fit_signal:
             max_step_width (float, optional): Maximum step width when fitting. Default is None.
         """
         model = ConstantModel()
-        params = model.make_params(c=self.trace[:10].mean())
+        params = model.make_params()
+
         for i, r in enumerate(self.regions):
             stime = self.time[slice(*r)]
             strace = self.trace[slice(*r)]
-            xmax, xmin = stime[-10], stime[10]
-            ymax, ymin = strace[-10:].mean(), strace[:10].mean()
+            regions = contiguous_regions(
+                self.pvalue[r[0]:r[1]] > self.min_threshold)
+            xmin = stime[regions[0][-1]]
+            xmax = stime[regions[-1][0]]
+            ymin = np.median(strace[slice(*regions[0])])
+            ymax = np.median(strace[slice(*regions[-1])])
             sigma = (xmax-xmin)/2
+            if i == 0:
+                params.add(f"c", value=ymin)
             step = StepModel(prefix=f"s{i}_", form=form)
             params.add(f"s{i}_amplitude",
                        value=ymax-ymin,
@@ -125,7 +135,7 @@ class fit_signal:
                            max=max_step_width)
             else:
                 params.add(f"s{i}_sigma",
-                           value=sigma,
+                           value=sigma/2,
                            min=0,
                            max=2*sigma)
             model += step
@@ -141,17 +151,25 @@ class fit_signal:
         for i, r in enumerate(self.regions):
             stime = self.time[slice(*r)]
             strace = self.trace[slice(*r)]
-            xmax, xmin = stime[-10], stime[10]
-            ymax, ymin = strace[-10:].mean(), strace[:10].mean()
-            sigma = (xmax-xmin)/2
+            regions = contiguous_regions(
+                self.pvalue[r[0]:r[1]] > self.min_threshold)
+            xmin = stime[regions[0][-1]]
+            xmax = stime[regions[-1][0]]
+            ymin = np.median(strace[slice(*regions[0])])
+            ymax = np.median(strace[slice(*regions[-1])])
+            sigma = xmax-xmin
             model = ConstantModel(prefix=f"s{i}_")
-            params = model.make_params(c=ymin)
+            params = model.make_params()
+            if i == 0:
+                params.add(f"s{i}_c", value=ymin)
+            else:
+                params.add(f"s{i}_c", value=new_c, vary=False)
             step = StepModel(prefix=f"s{i}_", form=form)
             params.add(f"s{i}_amplitude",
                        value=ymax-ymin,
                        min=min_step_size,
                        max=max_step_size)
-            params.add(f"s{i}_center", value=xmin + sigma)
+            params.add(f"s{i}_center", value=xmin)
             if fixed_step_width is not None:
                 params.add(f"s{i}_sigma",
                            value=fixed_step_width,
@@ -163,11 +181,14 @@ class fit_signal:
                            max=max_step_width)
             else:
                 params.add(f"s{i}_sigma",
-                           value=sigma,
+                           value=sigma/2,
                            min=0,
-                           max=2*sigma)
+                           max=sigma)
             model += step
-            self.outputs.append(model.fit(strace, params, x=stime))
+            result = model.fit(strace, params, x=stime)
+            params = result.params
+            new_c = params[f"s{i}_c"]+params[f"s{i}_amplitude"]
+            self.outputs.append(result)
 
     @property
     def results(self):
@@ -203,7 +224,7 @@ class fit_signal:
                 results["step_rate"].append(params[f"s{i}_amplitude"] /
                                             params[f"s{i}_sigma"])
                 results["step_start"].append(params[f"s{i}_center"])
-            last_step = params[f"s{i}_center"] + params[f"s{i}_sigma"]
+            # last_step = params[f"s{i}_center"] + params[f"s{i}_sigma"]
             # results["total_relaxation_time"] = last_step - first_step
             return results
         else:
