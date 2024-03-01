@@ -1,3 +1,6 @@
+0.1.1
+* fixed small bug in fitting
+* updated how step regions are differentiated
 0.1.0
 * switched to new faster fitting method
 * updated how step regions are differentiated

@@ -4,12 +4,13 @@ import numpy as np
 
 from lmfit import minimize, Parameters, report_fit
 from matplotlib.cbook import contiguous_regions
-from scipy.signal import find_peaks, peak_widths
+from scipy.signal import find_peaks
 from scipy.stats import ttest_ind
 from lmfit.lineshapes import step
 
 # set tiny to a small number
 tiny = 1.0e-15
+ast = np.lib.index_tricks.as_strided
 
 
 def rolling_ttest(trace,
@@ -95,6 +96,10 @@ class fit_signal:
             for r in regions:
                 r[0] -= int(window_length/2)
                 r[1] += int(window_length/2)
+                if r[0] < 0:
+                    r[0] = 0
+                if r[1] > len(trace):
+                    r[1] = len(trace)
                 rnlp = self.nlp[slice(*r)]
                 # Find peaks that are greater than max threshold
                 # and more prominent than min_threshold
@@ -108,20 +113,11 @@ class fit_signal:
                     # Subtract min_threshold by one
                     peaks2, _ = find_peaks(-rnlp,
                                            prominence=min_threshold)
-                    # Add one to ensure we reach the threshold
-                    threshold = rnlp[peaks2].min() + 1
-                    # Find contiguous regions greater than threshold
-                    r2 = contiguous_regions(
-                        rnlp >= threshold)
-                    # Filter out any regions without peaks greater than max_threshold
+                    peaks2 = np.insert(peaks2, 0, 0)
+                    peaks2 = np.append(peaks2, len(rnlp)-1)
+                    r2 = np.lib.stride_tricks.sliding_window_view(peaks2, 2)
                     r2 = np.array([rinner for rinner in r2 if any(
                         rnlp[slice(*rinner)] >= max_threshold)])
-                    # msk = np.ravel(np.diff(r2) >= window_length/10)
-                    # r2 = np.array(r2)[msk]
-                    # Adjust first and last region to have same start and end point
-                    # as the original region
-                    r2[0][0] = 0
-                    r2[-1][1] = len(rnlp)
                     for r3 in r2:
                         regions2.append(r[0]+r3)
                 else:
@@ -231,7 +227,7 @@ class fit_signal:
         # Get parameters from fit
         params = self.output.params.valuesdict()
         # Save parameters to dictionary
-        results = {'dwell_time': [],
+        results = {'dwell_times': [],
                    'step_sizes': []}
         for i in range(nregions):
             results['step_sizes'].append(params[f"s{i}_amplitude"])
