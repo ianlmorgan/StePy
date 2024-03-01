@@ -1,9 +1,15 @@
+import copy
 import matplotlib.pyplot as plt
 import numpy as np
 
-from lmfit.models import ConstantModel, StepModel
+from lmfit import minimize, Parameters, report_fit
 from matplotlib.cbook import contiguous_regions
+from scipy.signal import find_peaks, peak_widths
 from scipy.stats import ttest_ind
+from lmfit.lineshapes import step
+
+# set tiny to a small number
+tiny = 1.0e-15
 
 
 def rolling_ttest(trace,
@@ -28,14 +34,28 @@ def rolling_ttest(trace,
     return tscore, pvalue
 
 
+def objective(params, xdata, ydata, form='linear'):
+    """ Calculate total residual for fits to several data sets held
+    in a 2-D array"""
+    ndata = len(xdata)
+    resids = []
+    for i in range(ndata):
+        resids.append(ydata[i] - params[f's{i}_c'] - step(xdata[i],
+                                                          amplitude=params[f's{i}_amplitude'],
+                                                          center=params[f's{i}_center'],
+                                                          sigma=params[f's{i}_sigma'],
+                                                          form=form))
+    return np.concatenate(resids)
+
+
 class fit_signal:
     def __init__(self,
                  trace,
                  dt=1,
-                 window_length=100,
                  method='ttest',
-                 min_threshold=0.005,
-                 max_threshold=0.05,
+                 window_length=100,
+                 min_threshold=3,
+                 max_threshold=5,
                  **kwargs) -> None:
         """Calculate fit signal
 
@@ -47,6 +67,8 @@ class fit_signal:
             min_threshold (float, optional): Minimum pvalue threshold. Defaults to 0.005.
             max_threshold (float, optional): Maximum pvalue threshold. Defaults to 0.05.
         """
+        # Save initial parameters to use later
+        trace = np.asarray(trace)
         self.trace = trace
         self.dt = dt
         self.window_length = window_length
@@ -54,36 +76,79 @@ class fit_signal:
         self.time = time
         self.max_threshold = max_threshold
         self.min_threshold = min_threshold
+        # Leaving this here in case I want to add other methods in later
         if method == 'ttest':
             self.score, self.pvalue = rolling_ttest(trace,
                                                     window_length,
                                                     **kwargs)
-            regions = contiguous_regions(self.pvalue < max_threshold)
-            # Filter out regions that are shorter than window_length
-            msk = np.ravel(np.diff(regions) >= window_length)
+            # Use the negative log likelihood (p-value)
+            self.nlp = -np.log10(self.pvalue)
+            # Find contiguous regions greater than min_threshold
+            regions = contiguous_regions(self.nlp >= min_threshold)
+            # Filter out regions that are shorter than window_length/2
+            msk = np.ravel(np.diff(regions) >= window_length/2)
             regions = np.array(regions)[msk]
-            # Filter out regions with no pvalues greater than min_threshold
+            # Filter out regions with no pvalues greater than max_threshold
             regions = np.array([r for r in regions if any(
-                self.pvalue[slice(*r)] < min_threshold)])
-            self.regions = regions
+                self.nlp[slice(*r)] >= max_threshold)])
+            regions2 = []
+            for r in regions:
+                r[0] -= int(window_length/2)
+                r[1] += int(window_length/2)
+                rnlp = self.nlp[slice(*r)]
+                # Find peaks that are greater than max threshold
+                # and more prominent than min_threshold
+                peaks, _ = find_peaks(rnlp,
+                                      prominence=min_threshold,
+                                      height=max_threshold)
+                npeaks = len(peaks)
+                # Find split between peaks if there is more than one peak
+                if npeaks > 1:
+                    # Find valley(s) between first and last peaks
+                    # Subtract min_threshold by one
+                    peaks2, _ = find_peaks(-rnlp,
+                                           prominence=min_threshold)
+                    # Add one to ensure we reach the threshold
+                    threshold = rnlp[peaks2].min() + 1
+                    # Find contiguous regions greater than threshold
+                    r2 = contiguous_regions(
+                        rnlp >= threshold)
+                    # Filter out any regions without peaks greater than max_threshold
+                    r2 = np.array([rinner for rinner in r2 if any(
+                        rnlp[slice(*rinner)] >= max_threshold)])
+                    # msk = np.ravel(np.diff(r2) >= window_length/10)
+                    # r2 = np.array(r2)[msk]
+                    # Adjust first and last region to have same start and end point
+                    # as the original region
+                    r2[0][0] = 0
+                    r2[-1][1] = len(rnlp)
+                    for r3 in r2:
+                        regions2.append(r[0]+r3)
+                else:
+                    regions2.append(r)
+            self.regions = regions2
 
     def plot(self):
         fig, ax = plt.subplots(2, sharex=True,
                                gridspec_kw={'hspace': 0.1,
                                             'height_ratios': [1, 3]})
-        ax[0].semilogy(self.time, self.pvalue)
-        for r in self.regions:
-            ax[0].semilogy(self.time[slice(*r)], self.pvalue[slice(*r)])
+        ax[0].plot(self.time, self.nlp)
+        ax[0].axhline(self.max_threshold, ls='--')
+        ax[0].axhline(self.min_threshold, ls='--')
         ax[1].plot(self.time, self.trace, alpha=0.6)
-        if hasattr(self, "output"):
-            ax[1].plot(self.time, self.trace + self.output.residual)
-        if hasattr(self, 'outputs'):
-            for i, r in enumerate(self.regions):
-                stime = self.time[slice(*r)]
-                strace = self.trace[slice(*r)]
-                ax[1].plot(stime, strace+self.outputs[i].residual, lw=2)
+        for i, r in enumerate(self.regions):
+            stime = self.time[slice(*r)]
+            ax[0].plot(self.time[slice(*r)], self.nlp[slice(*r)])
+            if hasattr(self, 'output'):
+                params = self.output.params
+                yfit = params[f's{i}_c'] + step(stime,
+                                                params[f's{i}_amplitude'],
+                                                params[f's{i}_center'],
+                                                params[f's{i}_sigma'],
+                                                form=self.form)
+                ax[1].plot(stime, yfit, lw=2)
         ax[1].set_xlabel("Time")
-        ax[0].set_ylabel("P-value")
+        ax[0].set_ylabel("-$\log_{10}(p)$")
         ax[1].set_ylabel("Signal")
         fig.align_labels()
 
@@ -92,140 +157,172 @@ class fit_signal:
             min_step_size=-np.inf,
             max_step_size=np.inf,
             fixed_step_width=None,
-            max_step_width=np.inf):
-        """Fit the trace based on identified step regions.
-
-        Args:
-            form (str, optional): Type of step function to send to lmfits StepModel.
-            Options are 'linear', 'atan', 'erf', and 'logistic'. Defaults to 'linear'.
-            min_step_size (float, optional): Minimum step size when fitting. Default is -inf.
-            max_step_size (number, optional): Maximum step size when fitting. Default is inf.
-            fixed_step_width (float, optional): Fixed step width when fitting. Default is None.
-            max_step_width (float, optional): Maximum step width when fitting. Default is None.
-        """
-        model = ConstantModel()
-        params = model.make_params()
-
+            max_step_width=None):
+        self.form = form
+        params = Parameters()
+        xdata, ydata = [], []
+        nregions = len(self.regions)
+        if nregions == 0:
+            return self
         for i, r in enumerate(self.regions):
             stime = self.time[slice(*r)]
             strace = self.trace[slice(*r)]
-            regions = contiguous_regions(
-                self.pvalue[r[0]:r[1]] > self.min_threshold)
-            xmin = stime[regions[0][-1]]
-            xmax = stime[regions[-1][0]]
-            ymin = np.median(strace[slice(*regions[0])])
-            ymax = np.median(strace[slice(*regions[-1])])
-            sigma = (xmax-xmin)/2
-            if i == 0:
-                params.add(f"c", value=ymin)
-            step = StepModel(prefix=f"s{i}_", form=form)
-            params.add(f"s{i}_amplitude",
-                       value=ymax-ymin,
-                       min=min_step_size,
-                       max=max_step_size)
-            params.add(f"s{i}_center", value=xmin + sigma)
-            if fixed_step_width is not None:
-                params.add(f"s{i}_sigma",
-                           value=fixed_step_width,
-                           vary=False)
-            elif max_step_width is not None:
-                params.add(f"s{i}_sigma",
-                           value=sigma,
-                           min=0,
-                           max=max_step_width)
-            else:
-                params.add(f"s{i}_sigma",
-                           value=sigma/2,
-                           min=0,
-                           max=2*sigma)
-            model += step
-        self.output = model.fit(self.trace, params, x=self.time)
-
-    def fit2(self,
-             form='linear',
-             min_step_size=-np.inf,
-             max_step_size=np.inf,
-             fixed_step_width=None,
-             max_step_width=None):
-        self.outputs = []
-        for i, r in enumerate(self.regions):
-            stime = self.time[slice(*r)]
-            strace = self.trace[slice(*r)]
-            regions = contiguous_regions(
-                self.pvalue[r[0]:r[1]] > self.min_threshold)
-            xmin = stime[regions[0][-1]]
-            xmax = stime[regions[-1][0]]
-            ymin = np.median(strace[slice(*regions[0])])
-            ymax = np.median(strace[slice(*regions[-1])])
+            snlp = self.nlp[slice(*r)]
+            peak = np.argmax(snlp)
+            xdata.append(stime)
+            ydata.append(strace)
+            xmin = stime.min()
+            xmax = stime.max()
             sigma = xmax-xmin
-            model = ConstantModel(prefix=f"s{i}_")
-            params = model.make_params()
+
+            # Use data before region to find ymin
             if i == 0:
-                params.add(f"s{i}_c", value=ymin)
+                y = self.trace[:self.regions[i][0]]
             else:
-                params.add(f"s{i}_c", value=new_c, vary=False)
-            step = StepModel(prefix=f"s{i}_", form=form)
+                y = self.trace[self.regions[i-1][1]:self.regions[i][0]]
+            # Handle split peaks by assigning ymin to first value
+            if len(y) == 0:
+                ymin = strace[0]
+            else:
+                ymin = np.nanmedian(y)
+            # Used data after region to find ymax
+            if i == len(self.regions)-1:
+                y = self.trace[self.regions[i][1]:]
+            else:
+                y = self.trace[self.regions[i][1]:self.regions[i+1][0]]
+            # Handle split peaks by assigning ymax to last value
+            if len(y) == 0:
+                ymax = strace[-1]
+            else:
+                ymax = np.nanmedian(y)
+            # Assign starting yvalue for fit
+            if i == 0:  # Use ymin for first regions starting yvalue
+                params.add(f"s{i}_c", value=ymin)
+            else:  # Use previous regions ending position as starting yvalue
+                params.add(f"s{i}_c",
+                           expr=f"s{i-1}_c+s{i-1}_amplitude",
+                           vary=False)
+            # Assign amplitude initial value
             params.add(f"s{i}_amplitude",
                        value=ymax-ymin,
                        min=min_step_size,
                        max=max_step_size)
-            params.add(f"s{i}_center", value=xmin)
+            params.add(f"s{i}_center",
+                       value=stime[peak],
+                       min=xmin,
+                       max=xmax)
+            # Assign step widths
             if fixed_step_width is not None:
                 params.add(f"s{i}_sigma",
                            value=fixed_step_width,
                            vary=False)
             elif max_step_width is not None:
                 params.add(f"s{i}_sigma",
-                           value=sigma,
+                           value=sigma/2,
                            min=0,
                            max=max_step_width)
             else:
                 params.add(f"s{i}_sigma",
-                           value=sigma/2,
+                           value=1,
                            min=0,
                            max=sigma)
-            model += step
-            result = model.fit(strace, params, x=stime)
-            params = result.params
-            new_c = params[f"s{i}_c"]+params[f"s{i}_amplitude"]
-            self.outputs.append(result)
+        output = minimize(objective, params, args=(xdata, ydata, form))
+        self.output = output
+        # Get parameters from fit
+        params = self.output.params.valuesdict()
+        # Save parameters to dictionary
+        results = {'dwell_time': [],
+                   'step_sizes': []}
+        for i in range(nregions):
+            results['step_sizes'].append(params[f"s{i}_amplitude"])
+            if i == nregions-1:
+                pass
+            else:
+                results['dwell_times'].append(
+                    params[f"s{i+1}_center"]-params[f"s{i}_center"]-params[f"s{i}_sigma"])
+        self.results = results
+        return self
 
-    @property
-    def results(self):
+    def print_fit_report(self):
         if hasattr(self, "output"):
-            params = self.output.params.valuesdict()
-            results = {"step_height": [], "step_width": [], "dwell_time": [],
-                       "step_rate": [], "step_start": []}
-            for i, _ in enumerate(self.regions):
-                results["step_height"].append(params[f"s{i}_amplitude"])
-                results["step_width"].append(params[f"s{i}_sigma"])
-                if i == 0:
-                    results["dwell_time"].append(0)
-                else:
-                    dwell_time = params[f"s{i}_center"] -  \
-                        params[f"s{i-1}_center"] - \
-                        params[f"s{i-1}_sigma"]
-                    results["dwell_time"].append(dwell_time)
-                results["step_rate"].append(params[f"s{i}_amplitude"] /
-                                            params[f"s{i}_sigma"])
-                results["step_start"].append(params[f"s{i}_center"])
-            return results
-        elif hasattr(self, "outputs"):
-            results = {"step_height": [], "step_width": [],
-                       "step_rate": [], "step_start": [],
-                       # "total_relaxation_time": [],
-                       }
-            for i, output in enumerate(self.outputs):
-                params = output.params.valuesdict()
-                if i == 0:
-                    first_step = params[f"s{i}_center"]
-                results["step_height"].append(params[f"s{i}_amplitude"])
-                results["step_width"].append(params[f"s{i}_sigma"])
-                results["step_rate"].append(params[f"s{i}_amplitude"] /
-                                            params[f"s{i}_sigma"])
-                results["step_start"].append(params[f"s{i}_center"])
-            # last_step = params[f"s{i}_center"] + params[f"s{i}_sigma"]
-            # results["total_relaxation_time"] = last_step - first_step
-            return results
+            report_fit(self.output)
+
+
+def original_fit(self,
+                 form='linear',
+                 min_step_size=-np.inf,
+                 max_step_size=np.inf,
+                 fixed_step_width=None,
+                 max_step_width=np.inf):
+    """Fit the trace based on identified step regions.
+
+    Args:
+        form (str, optional): Type of step function to send to lmfits StepModel.
+        Options are 'linear', 'atan', 'erf', and 'logistic'. Defaults to 'linear'.
+        min_step_size (float, optional): Minimum step size when fitting. Default is -inf.
+        max_step_size (number, optional): Maximum step size when fitting. Default is inf.
+        fixed_step_width (float, optional): Fixed step width when fitting. Default is None.
+        max_step_width (float, optional): Maximum step width when fitting. Default is None.
+    """
+    self.form = form
+    params = Parameters()
+    xdata = []
+    ydata = []
+    for i, r in enumerate(self.regions):
+        stime = self.time[slice(*r)]
+        strace = self.trace[slice(*r)]
+        xdata.append(stime)
+        ydata.append(strace)
+        regions = contiguous_regions(
+            self.pvalue[r[0]:r[1]] > self.min_threshold)
+        xmin = stime[regions[0][-1]]
+        xmax = stime[regions[-1][0]]
+        ymin = np.median(strace[slice(*regions[0])])
+        ymax = np.median(strace[slice(*regions[-1])])
+        sigma = (xmax-xmin)/2
+        if i == 0:
+            params.add(f"s{i}_c", value=ymin)
+        step = StepModel(prefix=f"s{i}_", form=form)
+        params.add(f"s{i}_amplitude",
+                   value=ymax-ymin,
+                   min=min_step_size,
+                   max=max_step_size)
+        params.add(f"s{i}_center", value=xmin + sigma)
+        if fixed_step_width is not None:
+            params.add(f"s{i}_sigma",
+                       value=fixed_step_width,
+                       vary=False)
+        elif max_step_width is not None:
+            params.add(f"s{i}_sigma",
+                       value=sigma,
+                       min=0,
+                       max=max_step_width)
         else:
-            return None
+            params.add(f"s{i}_sigma",
+                       value=sigma/2,
+                       min=0,
+                       max=2*sigma)
+        model += step
+    self.output = model.fit(self.trace, params, x=self.time)
+    return self
+
+
+""" old code not used 
+params = self.output.params.valuesdict()
+results = {"step_height": [], "step_width": [], "dwell_time": [],
+            "step_rate": [], "step_start": []}
+for i, _ in enumerate(self.regions):
+    results["step_height"].append(params[f"s{i}_amplitude"])
+    results["step_width"].append(params[f"s{i}_sigma"])
+    if i == 0:
+        results["dwell_time"].append(0)
+    else:
+        dwell_time = params[f"s{i}_center"] -  \
+            params[f"s{i-1}_center"] - \
+            params[f"s{i-1}_sigma"]
+        results["dwell_time"].append(dwell_time)
+    results["step_rate"].append(params[f"s{i}_amplitude"] /
+                                params[f"s{i}_sigma"])
+    results["step_start"].append(params[f"s{i}_center"])
+return results
+"""
